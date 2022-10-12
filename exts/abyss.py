@@ -5,10 +5,14 @@ from discord.ext import tasks
 from bot import Bot
 import logging
 
-import datetime
+import math
 import random
+import asyncio
+import datetime
 
 log = logging.getLogger(__name__)
+
+START = 1665391604
 
 GUILD_ID = 773426467492069386
 ANNOUCE_CHANNEL = 973595833968787476
@@ -16,21 +20,22 @@ ANNOUCE_CHANNEL = 973595833968787476
 BUFF = {
     "518063131096907813": 5,     # Me
     "401363519523782658": 1,     # Pao
-    "881386447532331018": 0,     # Pentor second acc
+    "881386447532331018": 0,     # Pentor2
     "372687500596215808": 1,     # Fluke
     "630963785976250388": 1,     # DoubleQ
     "796676435502694401": 1,     # Thai
     "407378280799404032": 1,     # Pentor    
+    "432773406480531467": 1,     # Nig
 }
 
 PUNISHMENT = [
-    0,
-    10,
-    60,
-    300,
-    600,
-    1800,
-    3600,
+    0,     # Edge     -> ?
+    10,    # Forest   -> Edge
+    60,    # Fault    -> Forest
+    300,   # Giant    -> Fault
+    600,   # Sea      -> Giant
+    1800,  # Capital  -> Sea
+    3600,  # Final    -> Capital
 ]
 
 ROLES = [
@@ -39,7 +44,7 @@ ROLES = [
     1028841349509828689,  # Moon
     1028841449669804166,  # Black
     1028841569656262697,  # White
-    0000000000000000000,  # Unknown
+    0000000000000000000,  # Place holder
 ]
 
 CHANNELS = [
@@ -54,13 +59,62 @@ CHANNELS = [
 
 HOURS = [
     0,              # Level 0
-    10 * 60,        # Level 1
-    25 * 60,        # Level 2
-    60 * 60,        # Level 3
-    150 * 60,       # Level 4
-    300 * 60,       # Level 5
+    10 * 60,        # Level 1 -  10h -   600s
+    25 * 60,        # Level 2 -  25h -  1500s
+    60 * 60,        # Level 3 -  60h -  3600s
+    150 * 60,       # Level 4 - 150h -  9000s
+    300 * 60,       # Level 5 - 300h - 18000s
     float("inf")    # Level 6
 ]
+
+class AbyssCurse:
+    def __init__(self, bot):
+        self.bot = bot
+        self.tasks = {}
+
+        self.task = asyncio.create_task(self.remove_curse())
+
+    async def safe_mute(self, member: discord.Member, mute: bool) -> None:
+        try:
+            await member.edit(mute=mute)
+        except discord.HTTPException:
+            pass
+    
+    async def apply(self, member: discord.Member, level: int, to: int = 0) -> None:
+        if level < 0:
+            return
+
+        level = min(6, level)
+        
+        if to > level:
+            return
+    
+        mute_time = sum([PUNISHMENT[i] for i in range(level+1) if i > to])
+        if mute_time == 0:
+            return
+        
+        await self.safe_mute(member, True)
+
+        if member.id not in self.tasks:
+            self.tasks[member.id] = {
+                "member": member,
+                "time": 0
+            }
+            
+        self.tasks[member.id]["time"] += mute_time
+        print(f"Applied mute to {member.name} for {self.tasks[member.id]['time']}(+{mute_time}) sec")
+
+    async def remove_curse(self) -> None:
+        while True:
+            await asyncio.sleep(1)
+
+            for i in self.tasks:
+                self.tasks[i]['time'] -= 1
+                
+                if self.tasks[i]['time'] <= 0:
+                    await self.safe_mute(self.tasks[i]['member'], False)
+                    print("Remove mute for", self.tasks[i]['member'])
+                    del self.tasks[i]
 
 
 class Abyss(commands.Cog):
@@ -70,13 +124,16 @@ class Abyss(commands.Cog):
         self.guild = None
         self.channel = None
 
+        self.curse = None
+
         self.in_vc = []
 
         self.loop.start()
 
     def cog_unload(self):
         self.loop.cancel()
-
+        self.curse.task.cancel()
+    
     def save(self) -> None:
         self.bot.database.dumps("ABYSS", self.data)
 
@@ -168,10 +225,17 @@ class Abyss(commands.Cog):
                 print("Detected joining")
                 # Join, Switch to
                 self.register_in_voice(member.id)
+                if before.channel is not None:
+                    try:
+                        lv = CHANNELS.index(before.channel.id)
+                    except ValueError:
+                        lv = -1
+                    await self.curse.apply(member, lv, CHANNELS.index(after.channel.id))
             else:
                 print("Detecting leaving by switching")
                 # Switch to another channel
                 self.remove_from_voice(member.id)
+                await self.curse.apply(member, CHANNELS.index(before.channel.id))
 
         elif after.channel is None:
             # Leave
@@ -192,6 +256,7 @@ class Abyss(commands.Cog):
         self.guild = self.bot.get_guild(GUILD_ID)
         self.channel = self.bot.get_channel(ANNOUCE_CHANNEL)
         self.data = dict(await self.bot.database.load("ABYSS"))
+        self.curse = AbyssCurse(self.bot)
 
         for vc in self.guild.voice_channels:
             if vc.id not in CHANNELS:
@@ -200,6 +265,19 @@ class Abyss(commands.Cog):
             for member in vc.members:
                 if not member.bot:
                     self.register_in_voice(member.id)
+
+    @staticmethod
+    def progress_bar_str(progress : float, width : int):
+        # 0 <= progress <= 1
+        progress = abs(min(1, max(0, progress)) - 1)
+        whole_width = math.floor(progress * width)
+        remainder_width = (progress * width) % 1
+        part_width = math.floor(remainder_width * 5)
+        part_char = ["✶", "✷", "✸", "✹", "✺"][part_width]
+        if (width - whole_width - 1) < 0:
+          part_char = ""
+        line = "《 " + "▬" * whole_width + part_char  + "᲼᲼" * (width - whole_width - 1) + " 》"
+        return line
 
     @commands.command(name="rank")
     async def rank(self,
@@ -217,13 +295,12 @@ class Abyss(commands.Cog):
         exp = self.data[id]["Point"]
         max_exp = HOURS[lv]
 
-        per = round(exp / max_exp * 100, 2)
-        bar = int(per // 5)
-        none = 20 - bar
+        per = exp / max_exp
+        perr = round((1 - per) * 100, 2)
 
         if lv < 6:
-            name = "Time needed"
-            value = f"〚 {'#' * bar}{'-' * none} 〛 «**{per}%**»"
+            name = "แสงสว่างในจิตใจของคุณ"
+            value = f"{self.progress_bar_str(per, 20)} «**{perr}%**»"
         else:
             name = "พลังสะสม"
             value = f"«**{exp}%**»"
