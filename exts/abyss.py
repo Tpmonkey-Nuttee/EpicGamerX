@@ -7,7 +7,6 @@ import logging
 
 import math
 import random
-import asyncio
 import datetime
 
 log = logging.getLogger(__name__)
@@ -15,7 +14,12 @@ log = logging.getLogger(__name__)
 START = 1665391604
 
 GUILD_ID = 773426467492069386
-ANNOUCE_CHANNEL = 973595833968787476
+ANNOUCE_CHANNEL = 1029691542891417610
+
+NO_U = [
+    407378280799404032,
+    432773406480531467
+]
 
 BUFF = {
     "518063131096907813": 5,     # Me
@@ -24,18 +28,18 @@ BUFF = {
     "372687500596215808": 1,     # Fluke
     "630963785976250388": 1,     # DoubleQ
     "796676435502694401": 1,     # Thai
-    "407378280799404032": 1,     # Pentor    
+    "407378280799404032": 1,     # Pentor
     "432773406480531467": 1,     # Nig
 }
 
 PUNISHMENT = [
     0,     # Edge     -> ?
     10,    # Forest   -> Edge
-    60,    # Fault    -> Forest
-    300,   # Giant    -> Fault
-    600,   # Sea      -> Giant
-    1800,  # Capital  -> Sea
-    3600,  # Final    -> Capital
+    20,    # Fault    -> Forest
+    30,    # Giant    -> Fault
+    60,    # Sea      -> Giant
+    120,   # Capital  -> Sea
+    300,   # Final    -> Capital
 ]
 
 ROLES = [
@@ -67,20 +71,38 @@ HOURS = [
     float("inf")    # Level 6
 ]
 
+CURSE_TYPES = [
+    "mute", "deaf"
+]
+
 class AbyssCurse:
-    def __init__(self, bot):
+    def __init__(self, bot: Bot, channel: discord.TextChannel):
         self.bot = bot
+        self.channel = channel
         self.tasks = {}
 
-        self.task = asyncio.create_task(self.remove_curse())
+    def start(self) -> None:
+        if not self.remove_curse.is_running():
+            self.remove_curse.start()
+
+    def is_cursed(self, member: discord.Member) -> None:
+        return member.id in self.tasks and self.tasks[member.id]['time'] > 3
 
     async def safe_mute(self, member: discord.Member, mute: bool) -> None:
+        typ = self.tasks[member.id]['type'] == "mute"
+        
         try:
-            await member.edit(mute=mute)
+            if typ:
+                await member.edit(mute=mute)
+            else:
+                await member.edit(deafen=mute)
         except discord.HTTPException:
             pass
     
     async def apply(self, member: discord.Member, level: int, to: int = 0) -> None:
+        if member.id in NO_U:
+            return
+        
         if level < 0:
             return
 
@@ -92,29 +114,46 @@ class AbyssCurse:
         mute_time = sum([PUNISHMENT[i] for i in range(level+1) if i > to])
         if mute_time == 0:
             return
-        
-        await self.safe_mute(member, True)
 
+        typ = random.choice(CURSE_TYPES)
         if member.id not in self.tasks:
             self.tasks[member.id] = {
                 "member": member,
-                "time": 0
+                "time": 0,
+                "type": typ
             }
             
+            
+        await self.safe_mute(member, True)
+            
         self.tasks[member.id]["time"] += mute_time
-        print(f"Applied mute to {member.name} for {self.tasks[member.id]['time']}(+{mute_time}) sec")
+        text = 'ไม่สามารถพูดได้' if typ == 'mute' else 'หูหนวก'
+        await self.channel.send(
+            embed = discord.Embed(
+                description = f"นักเดินทาง {member.mention} ถูกคำสาปแห่ง Abyss!\nเขาจะ{text}เป็นเวลา **{format(self.tasks[member.id]['time'], ',')}** วินาที",
+                timestamp = datetime.datetime.utcnow()
+            ).set_author(name = "The Curse of the Abyss has been activated!")
+        )
+        print(f"Applied {typ} to {member.name} for {self.tasks[member.id]['time']}(+{mute_time}) sec")
 
+        self.start()
+        
+    @tasks.loop(seconds = 1)
     async def remove_curse(self) -> None:
-        while True:
-            await asyncio.sleep(1)
+        if len(self.tasks) == 0:
+            self.remove_curse.cancel()
+        
+        for i in self.tasks:
+            self.tasks[i]['time'] -= 1
+            
+            if self.tasks[i]['time'] == 0:
+                await self.safe_mute(self.tasks[i]['member'], False)
 
-            for i in self.tasks:
-                self.tasks[i]['time'] -= 1
+        for i in self.tasks.copy():
+            if not self.tasks[i]['time']:
+                del self.tasks[i]
+                print("Remove curse for", i)
                 
-                if self.tasks[i]['time'] <= 0:
-                    await self.safe_mute(self.tasks[i]['member'], False)
-                    print("Remove mute for", self.tasks[i]['member'])
-                    del self.tasks[i]
 
 
 class Abyss(commands.Cog):
@@ -132,7 +171,7 @@ class Abyss(commands.Cog):
 
     def cog_unload(self):
         self.loop.cancel()
-        self.curse.task.cancel()
+        self.curse.remove_curse.cancel()
     
     def save(self) -> None:
         self.bot.database.dumps("ABYSS", self.data)
@@ -178,7 +217,8 @@ class Abyss(commands.Cog):
             timestamp=datetime.datetime.utcnow(),
         ))
 
-    async def add_point(self, id: int, amount: int = 1):
+
+    async def add_point(self, id: int, amount: int = 1) -> None:
         id = str(id)
         self.register_profile(id)
 
@@ -186,9 +226,10 @@ class Abyss(commands.Cog):
 
         lv = self.data[id]["Level"]
         point = self.data[id]["Point"]
-        print(f"{id}: {point} +{amount}")
+        print(f"{id}: {point}/{HOURS[lv]} +{amount}")
 
         if point >= HOURS[lv]:
+            print(f"{id}: Leveled up {lv} -> {lv+1}")
             self.data[id]["Level"] += 1
             self.data[id]["Point"] = 0
 
@@ -218,11 +259,12 @@ class Abyss(commands.Cog):
             return
 
         if before.channel == after.channel:
+            if self.curse.is_cursed(member) and member.id not in NO_U and (before.mute or before.deaf):
+                await self.curse.safe_mute(member, True)
             return
 
         if after.channel is not None:
             if after.channel.id in CHANNELS:
-                print("Detected joining")
                 # Join, Switch to
                 self.register_in_voice(member.id)
                 if before.channel is not None:
@@ -232,14 +274,14 @@ class Abyss(commands.Cog):
                         lv = -1
                     await self.curse.apply(member, lv, CHANNELS.index(after.channel.id))
             else:
-                print("Detecting leaving by switching")
                 # Switch to another channel
                 self.remove_from_voice(member.id)
-                await self.curse.apply(member, CHANNELS.index(before.channel.id))
+
+                if before.channel is not None:
+                    await self.curse.apply(member, CHANNELS.index(before.channel.id))
 
         elif after.channel is None:
             # Leave
-            print("Detecting leaving")
             self.remove_from_voice(member.id)
 
     @tasks.loop(minutes=1)
@@ -256,7 +298,7 @@ class Abyss(commands.Cog):
         self.guild = self.bot.get_guild(GUILD_ID)
         self.channel = self.bot.get_channel(ANNOUCE_CHANNEL)
         self.data = dict(await self.bot.database.load("ABYSS"))
-        self.curse = AbyssCurse(self.bot)
+        self.curse = AbyssCurse(self.bot, self.channel)
 
         for vc in self.guild.voice_channels:
             if vc.id not in CHANNELS:
@@ -276,7 +318,7 @@ class Abyss(commands.Cog):
         part_char = ["✶", "✷", "✸", "✹", "✺"][part_width]
         if (width - whole_width - 1) < 0:
           part_char = ""
-        line = "《 " + "▬" * whole_width + part_char  + "᲼᲼" * (width - whole_width - 1) + " 》"
+        line = "《 " + "-" * whole_width + part_char + "`" + " " * (width - whole_width - 1) + " ` 》"
         return line
 
     @commands.command(name="rank")
