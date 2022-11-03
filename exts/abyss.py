@@ -85,75 +85,100 @@ class AbyssCurse:
         if not self.remove_curse.is_running():
             self.remove_curse.start()
 
-    def is_cursed(self, member: discord.Member) -> None:
-        return member.id in self.tasks and self.tasks[member.id]['time'] > 3
+    def is_muted(self, member: discord.Member) -> None:
+        return member.id in self.tasks and self.tasks[member.id]["mute"] > 3
 
-    async def safe_mute(self, member: discord.Member, mute: bool) -> None:
-        typ = self.tasks[member.id]['type'] == "mute"
-        
+    def is_deaf(self, member: discord.Member) -> None:
+        return member.id in self.tasks and self.tasks[member.id]['deaf'] > 3
+
+    async def safe_mute(self,
+                        member: discord.Member,
+                        mute: bool,
+                        typ: str = None) -> None:
+
         try:
-            if typ:
+            if typ == "mute":
+                return await member.edit(mute=mute)
+            elif typ == "deaf":
+                return await member.edit(deafen=mute)
+
+            if self.tasks[member.id]['mute'] > 0:
                 await member.edit(mute=mute)
-            else:
+            if self.tasks[member.id]['deaf'] > 0:
                 await member.edit(deafen=mute)
-        except discord.HTTPException:
+
+        except discord.HTTPException as e:
+            print(e)
             pass
-    
-    async def apply(self, member: discord.Member, level: int, to: int = 0) -> None:
+
+    async def apply(self,
+                    member: discord.Member,
+                    level: int,
+                    to: int = 0) -> None:
         if member.id in NO_U:
             return
-        
+
         if level < 0:
             return
 
         level = min(6, level)
-        
+
         if to > level:
             return
-    
-        mute_time = sum([PUNISHMENT[i] for i in range(level+1) if i > to])
+
+        mute_time = sum([PUNISHMENT[i] for i in range(level + 1) if i > to])
         if mute_time == 0:
             return
 
-        typ = random.choice(CURSE_TYPES)
+        typ = random.choice(CURSE_TYPES)              
         if member.id not in self.tasks:
             self.tasks[member.id] = {
-                "member": member,
-                "time": 0,
-                "type": typ
+                "member": member, 
+                "mute": 0, 
+                "deaf": 0
             }
-            
-            
+
+        self.tasks[member.id][typ] += mute_time
         await self.safe_mute(member, True)
-            
-        self.tasks[member.id]["time"] += mute_time
+
         text = 'ไม่สามารถพูดได้' if typ == 'mute' else 'หูหนวก'
         await self.channel.send(
             embed = discord.Embed(
-                description = f"นักเดินทาง {member.mention} ถูกคำสาปแห่ง Abyss!\nเขาจะ{text}เป็นเวลา **{format(self.tasks[member.id]['time'], ',')}** วินาที",
+                description = f"นักเดินทาง {member.mention} ถูกคำสาปแห่ง Abyss!\nเขาจะ{text}เป็นเวลา **{format(self.tasks[member.id][typ], ',')}** วินาที",
                 timestamp = datetime.datetime.utcnow()
             ).set_author(name = "The Curse of the Abyss has been activated!")
         )
-        print(f"Applied {typ} to {member.name} for {self.tasks[member.id]['time']}(+{mute_time}) sec")
+        print(
+            f"Applied {typ} to {member.name} for {self.tasks[member.id][typ]}(+{mute_time}) sec"
+        )
 
         self.start()
-        
-    @tasks.loop(seconds = 1)
+
+    @tasks.loop(seconds=1)
     async def remove_curse(self) -> None:
         if len(self.tasks) == 0:
             self.remove_curse.cancel()
-        
+
         for i in self.tasks:
-            self.tasks[i]['time'] -= 1
-            
-            if self.tasks[i]['time'] == 0:
-                await self.safe_mute(self.tasks[i]['member'], False)
+
+            if self.tasks[i]['mute'] >= 0:
+                self.tasks[i]['mute'] -= 1
+
+            if self.tasks[i]['deaf'] >= 0:
+                self.tasks[i]['deaf'] -= 1
+
+            if self.tasks[i]['mute'] == 0:
+                print(i, "mute curse has ran out")
+                await self.safe_mute(self.tasks[i]['member'], False, 'mute')
+
+            if self.tasks[i]['deaf'] == 0:
+                await self.safe_mute(self.tasks[i]['member'], False, 'deaf')
 
         for i in self.tasks.copy():
-            if not self.tasks[i]['time']:
+            if not self.tasks[i]['deaf'] and not self.tasks[i]['mute']:
+                print(i, "deaf curse has ran out")
                 del self.tasks[i]
                 print("Remove curse for", i)
-                
 
 
 class Abyss(commands.Cog):
@@ -166,13 +191,14 @@ class Abyss(commands.Cog):
         self.curse = None
 
         self.in_vc = []
+        self.last_vc = {}
 
         self.loop.start()
 
     def cog_unload(self):
         self.loop.cancel()
         self.curse.remove_curse.cancel()
-    
+
     def save(self) -> None:
         self.bot.database.dumps("ABYSS", self.data)
 
@@ -217,7 +243,6 @@ class Abyss(commands.Cog):
             timestamp=datetime.datetime.utcnow(),
         ))
 
-
     async def add_point(self, id: int, amount: int = 1) -> None:
         id = str(id)
         self.register_profile(id)
@@ -234,20 +259,15 @@ class Abyss(commands.Cog):
             self.data[id]["Point"] = 0
 
             if lv == 5:
-                return await self.channel.send(
-                    embed = discord.Embed(
-                        description = f"ขอแสดงความยินดีด้วยนักสำรวจ <@{id}> \n"
-                        "คุณได้มาถึงจุดที่ลึกที่สุดของ The Abyss แล้ว... \n"
-                        "ร่างกายของคุณเกิดความเปลี่ยนแปลง... และคุณได้รับพรแห่ง Abyss \n"
-                        "คุณสามารถใช้พลัง `!abyssblessing <นักสำรวจ>` เพื่อมอบพลังบางส่วนให้กับนักสำรวจได้",
-                        timestamp = datetime.datetime.utcnow()
-                    )
-                )
-            
-        
+                return await self.channel.send(embed=discord.Embed(
+                    description=f"ขอแสดงความยินดีด้วยนักสำรวจ <@{id}> \n"
+                    "คุณได้มาถึงจุดที่ลึกที่สุดของ The Abyss แล้ว... \n"
+                    "ร่างกายของคุณเกิดความเปลี่ยนแปลง... และคุณได้รับพรแห่ง Abyss \n"
+                    "คุณสามารถใช้พลัง `!abyssblessing <นักสำรวจ>` เพื่อมอบพลังบางส่วนให้กับนักสำรวจได้",
+                    timestamp=datetime.datetime.utcnow()))
+
             await self.update_role(id, lv)
             await self.annouce(id, lv)
-
 
         self.save()
 
@@ -259,11 +279,15 @@ class Abyss(commands.Cog):
             return
 
         if before.channel == after.channel:
-            if self.curse.is_cursed(member) and member.id not in NO_U and (before.mute or before.deaf):
-                await self.curse.safe_mute(member, True)
+            if self.curse.is_muted(
+                    member) and member.id not in NO_U and before.mute:
+                await self.curse.safe_mute(member, True, "mute")
+            if self.curse.is_deaf(
+                    member) and member.id not in NO_U and before.deaf:
+                await self.curse.safe_mute(member, True, "deaf")
             return
 
-        if after.channel is not None:
+        if after.channel is not None:            
             if after.channel.id in CHANNELS:
                 # Join, Switch to
                 self.register_in_voice(member.id)
@@ -272,17 +296,28 @@ class Abyss(commands.Cog):
                         lv = CHANNELS.index(before.channel.id)
                     except ValueError:
                         lv = -1
-                    await self.curse.apply(member, lv, CHANNELS.index(after.channel.id))
+                    await self.curse.apply(member, lv,
+                                           CHANNELS.index(after.channel.id))
+                # Just join but left the deeper abyss, NO CHEAT!
+                elif member.id in self.last_vc and self.last_vc[member.id] in CHANNELS:
+                    try:
+                        lv = CHANNELS.index(self.last_vc[member.id])
+                    except ValueError:
+                        lv = -1
+                    await self.curse.apply(member, lv,
+                                           CHANNELS.index(after.channel.id))
             else:
                 # Switch to another channel
                 self.remove_from_voice(member.id)
 
                 if before.channel is not None:
-                    await self.curse.apply(member, CHANNELS.index(before.channel.id))
+                    await self.curse.apply(member,
+                                           CHANNELS.index(before.channel.id))
 
         elif after.channel is None:
             # Leave
             self.remove_from_voice(member.id)
+            self.last_vc[member.id] = before.channel.id
 
     @tasks.loop(minutes=1)
     async def loop(self) -> None:
@@ -309,7 +344,7 @@ class Abyss(commands.Cog):
                     self.register_in_voice(member.id)
 
     @staticmethod
-    def progress_bar_str(progress : float, width : int):
+    def progress_bar_str(progress: float, width: int):
         # 0 <= progress <= 1
         progress = abs(min(1, max(0, progress)) - 1)
         whole_width = math.floor(progress * width)
@@ -317,8 +352,9 @@ class Abyss(commands.Cog):
         part_width = math.floor(remainder_width * 5)
         part_char = ["✶", "✷", "✸", "✹", "✺"][part_width]
         if (width - whole_width - 1) < 0:
-          part_char = ""
-        line = "《 " + "-" * whole_width + part_char + "`" + " " * (width - whole_width - 1) + " ` 》"
+            part_char = ""
+        line = "《 " + "-" * whole_width + part_char + "`" + " " * (
+            width - whole_width - 1) + " ` 》"
         return line
 
     @commands.command(name="rank")
@@ -347,20 +383,17 @@ class Abyss(commands.Cog):
             name = "พลังสะสม"
             value = f"«**{exp}%**»"
 
-        embed = discord.Embed(
-            description= f"<@&{ROLES[min(lv-1, 4)]}>",
-            timestamp=ctx.message.created_at
-        ).set_author(
-            name=target.name, icon_url=target.avatar_url
-        ).add_field(
-            name=name,
-            value=value
-        )
+        embed = discord.Embed(description=f"<@&{ROLES[min(lv-1, 4)]}>",
+                              timestamp=ctx.message.created_at).set_author(
+                                  name=target.name,
+                                  icon_url=target.avatar_url).add_field(
+                                      name=name, value=value)
 
         await ctx.send(embed=embed)
 
     @commands.command(name="abyssblessing")
-    async def abblss(self, ctx: commands.Context, target: discord.Member) -> None:
+    async def abblss(self, ctx: commands.Context,
+                     target: discord.Member) -> None:
         id = str(ctx.author.id)
 
         if id not in self.data:
@@ -387,12 +420,11 @@ class Abyss(commands.Cog):
 
         self.save()
 
-        await ctx.send(
-            embed = discord.Embed(
-                description = f"คุณได้มอบพลังของคุณให้กับ <@{tid}> ซึ่งนับเป็น «**{per}%**» ของเขาสำหรับการเติบโต"
-            )
-        )
-        
+        await ctx.send(embed=discord.Embed(
+            description=
+            f"คุณได้มอบพลังของคุณให้กับ <@{tid}> ซึ่งนับเป็น «**{per}%**» ของเขาสำหรับการเติบโต"
+        ))
+
     @commands.command(name="aset")
     @commands.is_owner()
     async def aset(self, ctx: commands.Context, target: discord.Member,
@@ -406,13 +438,12 @@ class Abyss(commands.Cog):
                    amount: float) -> None:
         self.data[str(target.id)]["Point"] += amount
         self.save()
-    
+
     @commands.command(name="aanounce")
     @commands.is_owner()
     async def aanounce(self, ctx: commands.Context, target: discord.Member,
-                   level: int) -> None:
+                       level: int) -> None:
         await self.annouce(str(target.id), level)
-    
 
 
 def setup(bot: Bot) -> None:
